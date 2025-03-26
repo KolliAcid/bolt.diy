@@ -83,7 +83,13 @@ export class GPUProvider {
       this.sessionId = data.id;
       
       // Iniciar heartbeat para mantener la sesión activa
-      this.startHeartbeat();
+     // Importa el heartbeat avanzado
+      import { LightningHeartbeat } from './lightning-heartbeat';
+      
+      // Y luego en initializeLightning(), reemplaza this.startHeartbeat(); con:
+      const heartbeat = new LightningHeartbeat(this.apiKey, this.sessionId, this.endpoint);
+      heartbeat.start();
+
       
     } catch (error) {
       console.error("Lightning initialization error:", error);
