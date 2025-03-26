@@ -1,5 +1,7 @@
 // extensions/gpu-providers.ts
 
+import { LightningHeartbeat } from './lightning-heartbeat';
+
 export enum ProviderType {
   LIGHTNING = "lightning",
   RUNPOD = "runpod",
@@ -18,6 +20,7 @@ export class GPUProvider {
   private endpoint: string;
   private isReady: boolean = false;
   private sessionId?: string;
+  private heartbeat?: LightningHeartbeat;
 
   constructor(config: ProviderConfig) {
     this.type = config.type;
@@ -82,14 +85,9 @@ export class GPUProvider {
       const data = await response.json();
       this.sessionId = data.id;
       
-      // Iniciar heartbeat para mantener la sesión activa
-     // Importa el heartbeat avanzado
-      import { LightningHeartbeat } from './lightning-heartbeat';
-      
-      // Y luego en initializeLightning(), reemplaza this.startHeartbeat(); con:
-      const heartbeat = new LightningHeartbeat(this.apiKey, this.sessionId, this.endpoint);
-      heartbeat.start();
-
+      // Initialize heartbeat
+      this.heartbeat = new LightningHeartbeat(this.apiKey, this.sessionId, this.endpoint);
+      this.heartbeat.start();
       
     } catch (error) {
       console.error("Lightning initialization error:", error);
@@ -186,23 +184,5 @@ export class GPUProvider {
 
   isAvailable(): boolean {
     return this.isReady;
-  }
-
-  private startHeartbeat(): void {
-    // Implementación simple de heartbeat
-    setInterval(async () => {
-      if (this.type === ProviderType.LIGHTNING && this.sessionId) {
-        try {
-          await fetch(`${this.endpoint}/clusters/${this.sessionId}/heartbeat`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${this.apiKey}`
-            }
-          });
-        } catch (error) {
-          console.error("Heartbeat error:", error);
-        }
-      }
-    }, 240000); // Cada 4 minutos
   }
 }
