@@ -22,6 +22,8 @@ export class BoltGPUExtension {
         type: ProviderType.RUNPOD,
         apiKey: runpodApiKey
       }));
+      
+      // Removed commented code about RunPodOptimizer
     }
   }
   
@@ -34,15 +36,6 @@ export class BoltGPUExtension {
     await Promise.all(initPromises);
     console.log("GPU Extension initialized with providers:", this.providers.length);
   }
-// Importar el optimizador de RunPod
-import { RunPodOptimizer } from './runpod-optimizer';
-
-// Y luego en el constructor, después de registrar los proveedores RunPod:
-if (runpodApiKey) {
-// Iniciar optimizador de RunPod
-const runpodOptimizer = new RunPodOptimizer(runpodApiKey);
-runpodOptimizer.start().catch(console.error);
-}
 
   async executeGPUTask(task: any) {
     const availableProviders = this.providers.filter(p => p.isAvailable());
