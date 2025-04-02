@@ -11,6 +11,7 @@ import type { ContextAnnotation, ProgressAnnotation } from '~/types/context';
 import { WORK_DIR } from '~/utils/constants';
 import { createSummary } from '~/lib/.server/llm/create-summary';
 import { extractPropertiesFromMessage } from '~/lib/.server/llm/utils';
+import { createSupabaseClient, saveChat, loadChat } from '~/lib/supabase';
 
 export async function action(args: ActionFunctionArgs) {
   return chatAction(args);
@@ -45,10 +46,35 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
   }>();
 
   const cookieHeader = request.headers.get('Cookie');
-  const apiKeys = JSON.parse(parseCookies(cookieHeader || '').apiKeys || '{}');
+  const cookies = parseCookies(cookieHeader || '');
+  const apiKeys = JSON.parse(cookies.apiKeys || '{}');
   const providerSettings: Record<string, IProviderSetting> = JSON.parse(
-    parseCookies(cookieHeader || '').providers || '{}',
+    cookies.providers || '{}',
   );
+  
+  // Get or create userId from cookies
+  let userId = cookies.userId;
+  if (!userId) {
+    userId = generateId();
+    // You would need to set this cookie in the response
+  }
+
+  // Initialize Supabase client
+  const supabase = createSupabaseClient(context.cloudflare?.env);
+  
+  // If this is a new conversation (first message), try to load previous messages
+  if (messages.length === 1 && messages[0].role === 'user') {
+    try {
+      const savedMessages = await loadChat(supabase, userId);
+      if (savedMessages && savedMessages.length > 0) {
+        logger.debug('Loaded saved chat history from Supabase');
+        // You might want to add logic to handle whether to use saved messages
+        // or start a new conversation based on user preference
+      }
+    } catch (error) {
+      logger.error('Failed to load chat history:', error);
+    }
+  }
 
   const stream = new SwitchableStream();
 
@@ -180,182 +206,4 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
         }
 
         // Stream the text
-        const options: StreamingOptions = {
-          toolChoice: 'none',
-          onFinish: async ({ text: content, finishReason, usage }) => {
-            logger.debug('usage', JSON.stringify(usage));
-
-            if (usage) {
-              cumulativeUsage.completionTokens += usage.completionTokens || 0;
-              cumulativeUsage.promptTokens += usage.promptTokens || 0;
-              cumulativeUsage.totalTokens += usage.totalTokens || 0;
-            }
-
-            if (finishReason !== 'length') {
-              dataStream.writeMessageAnnotation({
-                type: 'usage',
-                value: {
-                  completionTokens: cumulativeUsage.completionTokens,
-                  promptTokens: cumulativeUsage.promptTokens,
-                  totalTokens: cumulativeUsage.totalTokens,
-                },
-              });
-              dataStream.writeData({
-                type: 'progress',
-                label: 'response',
-                status: 'complete',
-                order: progressCounter++,
-                message: 'Response Generated',
-              } satisfies ProgressAnnotation);
-              await new Promise((resolve) => setTimeout(resolve, 0));
-
-              // stream.close();
-              return;
-            }
-
-            if (stream.switches >= MAX_RESPONSE_SEGMENTS) {
-              throw Error('Cannot continue message: Maximum segments reached');
-            }
-
-            const switchesLeft = MAX_RESPONSE_SEGMENTS - stream.switches;
-
-            logger.info(`Reached max token limit (${MAX_TOKENS}): Continuing message (${switchesLeft} switches left)`);
-
-            const lastUserMessage = messages.filter((x) => x.role == 'user').slice(-1)[0];
-            const { model, provider } = extractPropertiesFromMessage(lastUserMessage);
-            messages.push({ id: generateId(), role: 'assistant', content });
-            messages.push({
-              id: generateId(),
-              role: 'user',
-              content: `[Model: ${model}]\n\n[Provider: ${provider}]\n\n${CONTINUE_PROMPT}`,
-            });
-
-            const result = await streamText({
-              messages,
-              env: context.cloudflare?.env,
-              options,
-              apiKeys,
-              files,
-              providerSettings,
-              promptId,
-              contextOptimization,
-              contextFiles: filteredFiles,
-              summary,
-              messageSliceId,
-            });
-
-            result.mergeIntoDataStream(dataStream);
-
-            (async () => {
-              for await (const part of result.fullStream) {
-                if (part.type === 'error') {
-                  const error: any = part.error;
-                  logger.error(`${error}`);
-
-                  return;
-                }
-              }
-            })();
-
-            return;
-          },
-        };
-
-        dataStream.writeData({
-          type: 'progress',
-          label: 'response',
-          status: 'in-progress',
-          order: progressCounter++,
-          message: 'Generating Response',
-        } satisfies ProgressAnnotation);
-
-        const result = await streamText({
-          messages,
-          env: context.cloudflare?.env,
-          options,
-          apiKeys,
-          files,
-          providerSettings,
-          promptId,
-          contextOptimization,
-          contextFiles: filteredFiles,
-          summary,
-          messageSliceId,
-        });
-
-        (async () => {
-          for await (const part of result.fullStream) {
-            if (part.type === 'error') {
-              const error: any = part.error;
-              logger.error(`${error}`);
-
-              return;
-            }
-          }
-        })();
-        result.mergeIntoDataStream(dataStream);
-      },
-      onError: (error: any) => `Custom error: ${error.message}`,
-    }).pipeThrough(
-      new TransformStream({
-        transform: (chunk, controller) => {
-          if (!lastChunk) {
-            lastChunk = ' ';
-          }
-
-          if (typeof chunk === 'string') {
-            if (chunk.startsWith('g') && !lastChunk.startsWith('g')) {
-              controller.enqueue(encoder.encode(`0: "<div class=\\"__boltThought__\\">"\n`));
-            }
-
-            if (lastChunk.startsWith('g') && !chunk.startsWith('g')) {
-              controller.enqueue(encoder.encode(`0: "</div>\\n"\n`));
-            }
-          }
-
-          lastChunk = chunk;
-
-          let transformedChunk = chunk;
-
-          if (typeof chunk === 'string' && chunk.startsWith('g')) {
-            let content = chunk.split(':').slice(1).join(':');
-
-            if (content.endsWith('\n')) {
-              content = content.slice(0, content.length - 1);
-            }
-
-            transformedChunk = `0:${content}\n`;
-          }
-
-          // Convert the string stream to a byte stream
-          const str = typeof transformedChunk === 'string' ? transformedChunk : JSON.stringify(transformedChunk);
-          controller.enqueue(encoder.encode(str));
-        },
-      }),
-    );
-
-    return new Response(dataStream, {
-      status: 200,
-      headers: {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        Connection: 'keep-alive',
-        'Cache-Control': 'no-cache',
-        'Text-Encoding': 'chunked',
-      },
-    });
-  } catch (error: any) {
-    logger.error(error);
-
-    if (error.message?.includes('API key')) {
-      throw new Response('Invalid or missing API key', {
-        status: 401,
-        statusText: 'Unauthorized',
-      });
-    }
-
-    throw new Response(null, {
-      status: 500,
-      statusText: 'Internal Server Error',
-    });
-  }
-}
+        const options
