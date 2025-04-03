@@ -2,17 +2,13 @@ import { type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { createDataStream, generateId } from 'ai';
 import { MAX_RESPONSE_SEGMENTS, MAX_TOKENS, type FileMap } from '~/lib/.server/llm/constants';
 import { CONTINUE_PROMPT } from '~/lib/common/prompts/prompts';
-import { streamText, type Messages, type StreamingOptions } from '~/lib/.server/llm/stream-text';
 import SwitchableStream from '~/lib/.server/llm/switchable-stream';
 import type { IProviderSetting } from '~/types/model';
 import { createScopedLogger } from '~/utils/logger';
-import { getFilePaths, selectContext } from '~/lib/.server/llm/select-context';
-import type { ContextAnnotation, ProgressAnnotation } from '~/types/context';
 import { WORK_DIR } from '~/utils/constants';
-import { createSummary } from '~/lib/.server/llm/create-summary';
-import { extractPropertiesFromMessage } from '~/lib/.server/llm/utils';
-import { createSupabaseClient, saveChat, loadChat } from '~/lib/supabase';
+import type { ContextAnnotation, ProgressAnnotation } from '~/types/context';
 
+// Only export the action function
 export async function action(args: ActionFunctionArgs) {
   return chatAction(args);
 }
@@ -38,6 +34,13 @@ function parseCookies(cookieHeader: string): Record<string, string> {
 }
 
 async function chatAction({ context, request }: ActionFunctionArgs) {
+  // Import server-only modules inside the server function
+  const { streamText, type Messages, type StreamingOptions } = await import('~/lib/.server/llm/stream-text');
+  const { getFilePaths, selectContext } = await import('~/lib/.server/llm/select-context');
+  const { createSummary } = await import('~/lib/.server/llm/create-summary');
+  const { extractPropertiesFromMessage } = await import('~/lib/.server/llm/utils');
+  const { createSupabaseClient, saveChat, loadChat } = await import('~/lib/supabase');
+
   const { messages, files, promptId, contextOptimization } = await request.json<{
     messages: Messages;
     files: any;
@@ -192,79 +195,3 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
 
               return path;
             }),
-          } as ContextAnnotation);
-
-          dataStream.writeData({
-            type: 'progress',
-            label: 'context',
-            status: 'complete',
-            order: progressCounter++,
-            message: 'Code Files Selected',
-          } satisfies ProgressAnnotation);
-
-          // logger.debug('Code Files Selected');
-        }
-
-       // Stream the text
-      const options: StreamingOptions = {
-        messages: messages.slice(messageSliceId),
-        env: context.cloudflare?.env,
-        apiKeys,
-        files: filteredFiles || files,
-        providerSettings,
-        maxResponseSegments: MAX_RESPONSE_SEGMENTS,
-        maxTokens: MAX_TOKENS,
-        promptId,
-        contextOptimization,
-        onStart() {
-          dataStream.writeData({
-            type: 'progress',
-            label: 'response',
-            status: 'in-progress',
-            order: progressCounter++,
-            message: 'Generating Response',
-          } satisfies ProgressAnnotation);
-        },
-        onFinish(resp) {
-          if (resp.usage) {
-            cumulativeUsage.completionTokens += resp.usage.completionTokens || 0;
-            cumulativeUsage.promptTokens += resp.usage.promptTokens || 0;
-            cumulativeUsage.totalTokens += resp.usage.totalTokens || 0;
-          }
-          
-          // Save chat history to Supabase
-          try {
-            saveChat(supabase, userId, messages);
-          } catch (error) {
-            logger.error('Failed to save chat history:', error);
-          }
-          
-          dataStream.writeData({
-            type: 'progress',
-            label: 'response',
-            status: 'complete',
-            order: progressCounter++,
-            message: 'Response Complete',
-          } satisfies ProgressAnnotation);
-        }
-      };
-      
-      await streamText(stream, options);
-            }
-          });
-      
-          return new Response(dataStream.asReadableStream(), {
-            headers: {
-              'Content-Type': 'text/event-stream',
-              'Cache-Control': 'no-cache',
-              'Connection': 'keep-alive',
-            },
-          });
-        } catch (error) {
-          logger.error('Failed to process chat:', error);
-          return new Response(JSON.stringify({ error: 'Failed to process chat' }), {
-            status: 500,
-            headers: { 'Content-Type': 'application/json' },
-          });
-        }
-      }
