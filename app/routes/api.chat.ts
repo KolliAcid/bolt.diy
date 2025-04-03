@@ -17,29 +17,32 @@ const logger = createScopedLogger('api.chat');
 
 function parseCookies(cookieHeader: string): Record<string, string> {
   const cookies: Record<string, string> = {};
-
   const items = cookieHeader.split(';').map((cookie) => cookie.trim());
-
   items.forEach((item) => {
     const [name, ...rest] = item.split('=');
-
     if (name && rest) {
       const decodedName = decodeURIComponent(name.trim());
       const decodedValue = decodeURIComponent(rest.join('=').trim());
       cookies[decodedName] = decodedValue;
     }
   });
-
   return cookies;
 }
 
+// Move all server-side logic into this function
 async function chatAction({ context, request }: ActionFunctionArgs) {
-  // Import server-only modules inside the server function
-  const { streamText, type Messages, type StreamingOptions } = await import('~/lib/.server/llm/stream-text');
-  const { getFilePaths, selectContext } = await import('~/lib/.server/llm/select-context');
+  // Import server-only modules inside the function
+  const streamTextModule = await import('~/lib/.server/llm/stream-text');
+  const streamText = streamTextModule.streamText;
+  const selectContextModule = await import('~/lib/.server/llm/select-context');
+  const { getFilePaths, selectContext } = selectContextModule;
   const { createSummary } = await import('~/lib/.server/llm/create-summary');
   const { extractPropertiesFromMessage } = await import('~/lib/.server/llm/utils');
   const { createSupabaseClient, saveChat, loadChat } = await import('~/lib/supabase');
+  
+  // Use type from the module
+  type Messages = streamTextModule.Messages;
+  type StreamingOptions = streamTextModule.StreamingOptions;
 
   const { messages, files, promptId, contextOptimization } = await request.json<{
     messages: Messages;
@@ -59,20 +62,17 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
   let userId = cookies.userId;
   if (!userId) {
     userId = generateId();
-    // You would need to set this cookie in the response
   }
 
   // Initialize Supabase client
   const supabase = createSupabaseClient(context.cloudflare?.env);
   
-  // If this is a new conversation (first message), try to load previous messages
+  // Load previous messages if this is a new conversation
   if (messages.length === 1 && messages[0].role === 'user') {
     try {
       const savedMessages = await loadChat(supabase, userId);
       if (savedMessages && savedMessages.length > 0) {
         logger.debug('Loaded saved chat history from Supabase');
-        // You might want to add logic to handle whether to use saved messages
-        // or start a new conversation based on user preference
       }
     } catch (error) {
       logger.error('Failed to load chat history:', error);
@@ -80,18 +80,17 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
   }
 
   const stream = new SwitchableStream();
-
   const cumulativeUsage = {
     completionTokens: 0,
     promptTokens: 0,
     totalTokens: 0,
   };
-  const encoder: TextEncoder = new TextEncoder();
-  let progressCounter: number = 1;
+  const encoder = new TextEncoder();
+  let progressCounter = 1;
 
   try {
     const totalMessageContent = messages.reduce((acc, message) => acc + message.content, '');
-    logger.debug(`Total message length: ${totalMessageContent.split(' ').length}, words`);
+    logger.debug(`Total message length: ${totalMessageContent.split(' ').length} words`);
 
     let lastChunk: string | undefined = undefined;
 
@@ -116,9 +115,6 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
             message: 'Analysing Request',
           } satisfies ProgressAnnotation);
 
-          // Create a summary of the chat
-          console.log(`Messages count: ${messages.length}`);
-
           summary = await createSummary({
             messages: [...messages],
             env: context.cloudflare?.env,
@@ -135,6 +131,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
               }
             },
           });
+          
           dataStream.writeData({
             type: 'progress',
             label: 'summary',
@@ -149,7 +146,6 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
             chatId: messages.slice(-1)?.[0]?.id,
           } as ContextAnnotation);
 
-          // Update context buffer
           logger.debug('Updating Context Buffer');
           dataStream.writeData({
             type: 'progress',
@@ -159,8 +155,6 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
             message: 'Determining Files to Read',
           } satisfies ProgressAnnotation);
 
-          // Select context files
-          console.log(`Messages count: ${messages.length}`);
           filteredFiles = await selectContext({
             messages: [...messages],
             env: context.cloudflare?.env,
@@ -181,17 +175,15 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
           });
 
           if (filteredFiles) {
-            logger.debug(`files in context : ${JSON.stringify(Object.keys(filteredFiles))}`);
+            logger.debug(`files in context: ${JSON.stringify(Object.keys(filteredFiles))}`);
           }
 
           dataStream.writeMessageAnnotation({
             type: 'codeContext',
-            files: Object.keys(filteredFiles).map((key) => {
+            files: Object.keys(filteredFiles || {}).map((key) => {
               let path = key;
-
               if (path.startsWith(WORK_DIR)) {
                 path = path.replace(WORK_DIR, '');
               }
-
               return path;
             }),
