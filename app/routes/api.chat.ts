@@ -2,16 +2,16 @@ import { type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { createDataStream, generateId } from 'ai';
 import { MAX_RESPONSE_SEGMENTS, MAX_TOKENS, type FileMap } from '~/lib/.server/llm/constants';
 import { CONTINUE_PROMPT } from '~/lib/common/prompts/prompts';
+import { streamText, type Messages, type StreamingOptions } from '~/lib/.server/llm/stream-text';
 import SwitchableStream from '~/lib/.server/llm/switchable-stream';
 import type { IProviderSetting } from '~/types/model';
 import { createScopedLogger } from '~/utils/logger';
-import { WORK_DIR } from '~/utils/constants';
+import { getFilePaths, selectContext } from '~/lib/.server/llm/select-context';
 import type { ContextAnnotation, ProgressAnnotation } from '~/types/context';
-
-// Only export the action function
-export async function action(args: ActionFunctionArgs) {
-  return chatAction(args);
-}
+import { WORK_DIR } from '~/utils/constants';
+import { createSummary } from '~/lib/.server/llm/create-summary';
+import { extractPropertiesFromMessage } from '~/lib/.server/llm/utils';
+import { createSupabaseClient, saveChat, loadChat } from '~/lib/supabase';
 
 const logger = createScopedLogger('api.chat');
 
@@ -29,21 +29,7 @@ function parseCookies(cookieHeader: string): Record<string, string> {
   return cookies;
 }
 
-// Move all server-side logic into this function
-async function chatAction({ context, request }: ActionFunctionArgs) {
-  // Import server-only modules inside the function
-  const streamTextModule = await import('~/lib/.server/llm/stream-text');
-  const streamText = streamTextModule.streamText;
-  const selectContextModule = await import('~/lib/.server/llm/select-context');
-  const { getFilePaths, selectContext } = selectContextModule;
-  const { createSummary } = await import('~/lib/.server/llm/create-summary');
-  const { extractPropertiesFromMessage } = await import('~/lib/.server/llm/utils');
-  const { createSupabaseClient, saveChat, loadChat } = await import('~/lib/supabase');
-  
-  // Use type from the module
-  type Messages = streamTextModule.Messages;
-  type StreamingOptions = streamTextModule.StreamingOptions;
-
+export async function chatAction({ context, request }: ActionFunctionArgs) {
   const { messages, files, promptId, contextOptimization } = await request.json<{
     messages: Messages;
     files: any;
@@ -182,8 +168,4 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
             type: 'codeContext',
             files: Object.keys(filteredFiles || {}).map((key) => {
               let path = key;
-              if (path.startsWith(WORK_DIR)) {
-                path = path.replace(WORK_DIR, '');
-              }
-              return path;
-            }),
+              if (path.startsWith(WORK
