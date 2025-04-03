@@ -205,5 +205,66 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
           // logger.debug('Code Files Selected');
         }
 
-        // Stream the text
-        const options
+       // Stream the text
+      const options: StreamingOptions = {
+        messages: messages.slice(messageSliceId),
+        env: context.cloudflare?.env,
+        apiKeys,
+        files: filteredFiles || files,
+        providerSettings,
+        maxResponseSegments: MAX_RESPONSE_SEGMENTS,
+        maxTokens: MAX_TOKENS,
+        promptId,
+        contextOptimization,
+        onStart() {
+          dataStream.writeData({
+            type: 'progress',
+            label: 'response',
+            status: 'in-progress',
+            order: progressCounter++,
+            message: 'Generating Response',
+          } satisfies ProgressAnnotation);
+        },
+        onFinish(resp) {
+          if (resp.usage) {
+            cumulativeUsage.completionTokens += resp.usage.completionTokens || 0;
+            cumulativeUsage.promptTokens += resp.usage.promptTokens || 0;
+            cumulativeUsage.totalTokens += resp.usage.totalTokens || 0;
+          }
+          
+          // Save chat history to Supabase
+          try {
+            saveChat(supabase, userId, messages);
+          } catch (error) {
+            logger.error('Failed to save chat history:', error);
+          }
+          
+          dataStream.writeData({
+            type: 'progress',
+            label: 'response',
+            status: 'complete',
+            order: progressCounter++,
+            message: 'Response Complete',
+          } satisfies ProgressAnnotation);
+        }
+      };
+      
+      await streamText(stream, options);
+            }
+          });
+      
+          return new Response(dataStream.asReadableStream(), {
+            headers: {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            },
+          });
+        } catch (error) {
+          logger.error('Failed to process chat:', error);
+          return new Response(JSON.stringify({ error: 'Failed to process chat' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      }
